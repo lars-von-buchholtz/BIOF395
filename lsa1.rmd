@@ -24,12 +24,11 @@ tfidf data was saved in MatrixMarket format with the name 'matrixfull.mtx'. The 
 ## import data from tfidf
 
 tfidf <- readMM('matrixfull.mtx') # as a sparse matrix
-#tfidfmat <- as.matrix(tfidf)
 pmids <- scan('allpmids.txt',what = 'list')
 terms <- readLines('termsfull.txt')
 terms <- gsub('\\s+', '_',terms)
-#rownames(tfidfmat) <- pmids
-#colnames(tfidfmat) <- terms
+rownames(tfidf) <- pmids
+colnames(tfidf) <- terms
 ```
 
 # Singular value decomposition
@@ -441,7 +440,7 @@ confusionMatrix(data = trainpred,reference = trainingset$cat)
 
 Then the test set is predicted with the Random Forest model and a confusion matrix displayed.
 
-testInheritedMethods()}
+``` {r predict test set}
 testpred <- predict(model,testset[,1:10])
 confusionMatrix(data = testpred,reference = testset$cat)
 ```
