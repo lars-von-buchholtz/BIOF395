@@ -1,5 +1,4 @@
-# BIOF395
-Classification of taste abstracts and expression analysis
+# BIOF395: Classification of taste abstracts and expression analysis
 
 
 This analysis contains the following files:
