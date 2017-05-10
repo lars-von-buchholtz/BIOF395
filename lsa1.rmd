@@ -1,0 +1,471 @@
+## import required libraries
+
+
+```{r import libraries}
+setwd("~/textmine")
+
+library(Matrix)
+library(irlba)
+library(Rtsne)
+library(ggplot2)
+library(DBI)
+library(RSQLite)
+library(knitr)
+library(caret)
+library(randomForest)
+```
+
+
+## read tf-idf data from python
+
+tfidf data was saved in MatrixMarket format with the name 'matrixfull.mtx'. The rownames (Pubmed ids) are in the file 'allpmids.txt' and the column names (terms of the tf-idf) in the file 'termsfull.txt'
+
+```{r get tf-idf data from python, cache = TRUE}
+## import data from tfidf
+
+tfidf <- readMM('matrixfull.mtx') # as a sparse matrix
+#tfidfmat <- as.matrix(tfidf)
+pmids <- scan('allpmids.txt',what = 'list')
+terms <- readLines('termsfull.txt')
+terms <- gsub('\\s+', '_',terms)
+#rownames(tfidfmat) <- pmids
+#colnames(tfidfmat) <- terms
+```
+
+# Singular value decomposition
+
+We first center and scale the tf-idf matrix then run singular value decomposition with the irlba package. We plot the first 100 principal components. There is an elbow at about 10 dimensions. We keep 30 dimensions in the dataframe but do clustering and tSNE only on the first 10.
+
+``` {r svd, cache = TRUE}
+
+sv <- irlba(tfidf,100) # irlba is a package for singular value decomposition
+plot(sv$d^2/sum(sv$d^2)*100,ylab="Percent variability explained")
+sv30 <- irlba(tfidf,30) # compute again for the first 30 SV's
+tfidfsvu = data.frame(sv30$u,row.names = pmids) # now a dataframe with rows as pmids and columns as singular values
+```
+
+## Check singular values 
+
+for each of the first 20 principal components, we checked the 20 top terms that dominate this component.
+
+```{r check terms in pcas, eval= FALSE}
+pcas <-  sv30$v %*% diag(sv30$d) 
+for (i in 1:20) {
+  print(terms[order(pcas[,i])[1:20]])
+}
+```
+
+## Hierarchical clustering
+
+We perform hierarchical clustering on a distance matrix of the principal components. It turns out that the resulting clusters don't match well with the tsne plot of the principal components.
+
+``` {r hierarchical clustering, cache = TRUE}
+set.seed(4321)
+clusters <- hclust(dist(tfidfsvu))
+plot(clusters)
+```
+
+## k-means clustering on PC's
+
+We checked a number of k values and 12 looks OK in the tsne. 
+
+```{r k-means clustering, cache = TRUE}
+set.seed(4321)
+clusterK12 <- kmeans(tfidfsvu[,1:10], 12, nstart = 50)
+tfidfsvu[names(clusterK12$cluster),'clusterK12'] <- clusterK12$cluster
+tfidfsvu$clusterK12 <- as.factor(tfidfsvu$clusterK12)
+tfidfsvu$clusterlab <- tfidfsvu$clusterK12
+levels(tfidfsvu$clusterlab) <- c('Nutrition','Learning','Therapy','Wine','Mix','Diagnosis/Genetics','Taste Cell Physiology I','Food Technology','Alcoholism','CNS','Garbage','Taste Cell Physiology II') # these categories were deduced from the exploration of abstract titles below
+write.csv(tfidfsvu,'tfidfsvu.csv')
+```
+
+## Data Exploration
+
+For each of the 12 clusters identified by k-means clustering, 10 randomly selected titles are displayed by this code chunk. The cluster names in the previous plot are based on this exploratory analysis.
+
+``` {r display 20 random titles from each cluster, eval = FALSE}
+splitlist <- split(row.names(tfidfsvu), tfidfsvu$clusterK12)
+for (i in 1:length(splitlist)) {
+  samplepmids <- sample(splitlist[[i]],10)
+  for (pmid in samplepmids) {
+    print(paste(i, dbGetQuery(con,paste("SELECT title FROM articles WHERE pmid=",pmid))))
+  }
+}
+```
+
+
+## Shared nearest neighbor clustering
+
+SNN clustering took too long to compute.
+
+``` {r snn, eval = FALSE}
+source('SNN.R') # downloaded into working directory from http://bioinfo.uncc.edu/SNNCliq/
+snnclust <- SNN(svu[,1:20],'edgefile.txt',k=10)
+# then run python3 ./Cliq.py -i edgefile.txt -o outfile.txt [options]
+# -r 0.7 default, -m 0.5 default
+tfidfsvu[,'SNNclust'] <- scan('outfile.txt',what = 'list')
+```
+
+
+## Affinity propagation clustering
+
+AP clustering took too long to compute.
+
+```{r AP, eval = FALSE}
+library(apcluster)
+apclust <- apcluster(negDistMat(r=2), tfidfsvu[1:1000,1:20], q= 0)
+apclust[1:length(apclust)]
+for (cluster in 1:length(apclust)) {
+  for (item in apclust[[cluster]]) {
+    tfidfsvu[item,'AP0'] <- cluster
+  }
+}
+```
+
+
+
+## t-SNE on random subsample of 3000 abstracts
+
+this was only done because of long tsne computing times. After the full tsne worked, this is no longer required.
+
+``` {r tsne 3000, eval = FALSE}
+randomindex = sample(nrow(tfidfsvu), 3000)
+randompmids = pmids[randomindex]
+randomsvu = tfidfsvu[randomindex,]
+randomtsne <- Rtsne(randomsvu[,1:20])
+randomtsneframe <- data.frame(randomtsne$Y,row.names = randompmids)
+colnames(randomtsneframe) <- c('X','Y')
+randomtsneframe[randompmids,'clusterK12'] <- tfidfsvu[randompmids,'clusterK12']
+```
+
+## t-SNE on full sample set
+
+The Barnes-Hut implementation Rtsne runs reasonably fast with a theta of 0.5. The data is then plotted with k-means clusters colored. The annotation of the individual clusters was done after some data exploration (shown below).
+
+
+``` {r tsne full, cache = TRUE}
+
+fulltsne <- Rtsne(tfidfsvu[,1:10],check_duplicates = F)
+tfidfsvu[,'tsne_X'] <- fulltsne$Y[,1]
+tfidfsvu[,'tsne_Y'] <- fulltsne$Y[,2]
+
+cbPalette <- rainbow(12)
+ggplot(tfidfsvu, aes(x=tsne_X, y=tsne_Y, color=clusterlab) ) + 
+  geom_point(size=1)    +             
+  scale_colour_manual(values=cbPalette) 
+
+```
+
+
+
+
+## Functions to find terms and clusters, plot them in a tsne plot and extract the pmids for a given cluster term combination
+
+- `findterm` takes a vector of pmids to search, a term and (optionally) the sqlite database to search and returns a logical vector 
+- `findandplotterm` takes a vector of pmids to search, a term, (optionally) the sqlite database to search and the dataframe with tSNE coordinates. It plots  a tSNE plot with the hits in red.
+- `findORterms` takes a vector of pmids to search, a vector of search terms, (optionally) the sqlite database to search. It returns a logical vector for abstracts that contain any of the search terms (logical OR)
+- `findclusters` takes a vector of clusters and a dataframe with the cluster information in column clusterK12 and returns a logical vector of the union of all the clusters specified.
+- `extractCat` takes a vector of clusters and a vector of terms and returns all pmids that are in either of the clusters and contain either of the search terms
+
+``` {r function find and plot}
+
+
+findterm <- function(pmids,term,database='taste.db') {
+  
+  ## function checks first if the search result is already present in the searches table of the SQLite    database and if possible draws the results from there. If not, search results are written to a new       column of the table. Results are plotted
+
+  term <- tolower(c(term))
+  term_ <- gsub(" ","_",term) #in order to handle search terms with whitespaces in them
+  
+  con <- dbConnect(RSQLite::SQLite(), dbname='taste.db')
+  fields <- dbListFields(con,'searches')
+  
+  if (term_ %in% fields) {
+    rs <- dbSendQuery(con, paste("SELECT",term_,"FROM searches"))
+    result <-as.logical(unlist(dbFetch(rs,n= -1)))
+    dbClearResult(rs)
+  } else {
+    result <- vector()
+    #make new boolean column in table
+    dbExecute(con,paste("ALTER TABLE searches ADD COLUMN",term_,"INT"))
+    i <- 1
+    for (pmid in pmids) {
+      
+      #load title and abstract, concatenate, grep term
+      frame <- dbGetQuery(con,paste("SELECT title , abstract FROM articles WHERE pmid=",pmid))
+      text <- tolower(c(paste(frame[1,'title'],frame[1,'abstract'])))
+      
+      #write boolean result to list and to result vector
+      result[i] <- grepl(term,text)
+      dbExecute(con,paste("UPDATE searches SET", term_, "=", as.integer(result[i]), "WHERE pmid =", pmid))
+      
+      i <- i + 1
+    }
+  }
+  dbDisconnect(con)
+  return(result)  
+}
+
+findandplotterm <- function(pmids,term,database='taste.db',t=tfidfsvu[,c('tsne_X','tsne_Y')]) {
+  result <- findterm(pmids,term,database)
+  #get coordinates for all red points
+  xred <- t[pmids[result],'tsne_X']
+  yred <- t[pmids[result],'tsne_Y']
+  #plot all points in grey
+  ggplot() + 
+    geom_point(aes(x=t$tsne_X, y=t$tsne_Y),color='grey',size=1)    +   
+    geom_point(aes(x=xred, y=yred),               # colour depends on cond2
+               color='red',size=0.5) + 
+    ggtitle(term)
+}
+
+findORterms <- function(pmids,searchterms,database='taste.db') {
+  tmpresults <- findterm(pmids,searchterms[1])
+  if (length(searchterms<2)) {
+    return (tmpresults)
+  } else {
+      for (i in 2:length(searchterms)) {
+        tmpresults<- tmpresults | findterm(pmids,searchterms[i])
+      }
+      return(tmpresults)
+  }
+}
+
+findclusters <- function(clusters,t=tfidfsvu) {
+  tmpresults <- t$clusterK12 == clusters[1]
+  if (as.numeric(length(clusters)<2)) {
+    return(tmpresults)
+    
+  } else {
+    for (i in 2:length(clusters)) {
+      tmpresults <- tmpresults | (t$clusterK12 == clusters[i])
+    }
+    return(tmpresults)
+  }
+  
+}
+findandplotcluster <- function(clusters,t=tfidfsvu[,c('tsne_X','tsne_Y','clusterK12')]) {
+  # get coordinates for all red points
+  pos <- findclusters(clusters,t)
+  str(pos)
+  xred <- t[pmids[pos],'tsne_X']
+  yred <- t[pmids[pos],'tsne_Y']
+  # plot all points in grey
+  ggplot() + 
+    geom_point(aes(x=t$tsne_X, y=t$tsne_Y),               # colour depends on cond2
+               color='grey',size=1)    +   
+    geom_point(aes(x=xred, y=yred),               # colour depends on cond2
+               color='red',size=1) + ggtitle(paste(clusters))
+}
+extractCat <- function(pmids,clusters,searchterms,database='taste.db',t=tfidfsvu) {
+  c <- findclusters(clusters,t)
+  t <- findORterms(pmids,searchterms,databased)
+  return(pmids[c & t])
+}
+```
+
+## make searches table in sqlite database and populate with pmids  
+
+Since text searches of the whole abstract database take quite long, we created a table in the sqlite database that stores previous term searches. The table is called 'searches' and was populated with all Pubmed ID's as the PRIMARY KEY. The findterm function will create new columns with each new search term.
+
+
+
+## Function to plot multiple plots on one page
+
+from http://www.cookbook-r.com/
+
+``` {r multiplot}
+# Multiple plot function
+#
+# ggplot objects can be passed in ..., or to plotlist (as a list of ggplot objects)
+# - cols:   Number of columns in layout
+# - layout: A matrix specifying the layout. If present, 'cols' is ignored.
+#
+# If the layout is something like matrix(c(1,2,3,3), nrow=2, byrow=TRUE),
+# then plot 1 will go in the upper left, 2 will go in the upper right, and
+# 3 will go all the way across the bottom.
+#
+multiplot <- function(..., plotlist=NULL, file, cols=1, layout=NULL) {
+  library(grid)
+
+  # Make a list from the ... arguments and plotlist
+  plots <- c(list(...), plotlist)
+
+  numPlots = length(plots)
+
+  # If layout is NULL, then use 'cols' to determine layout
+  if (is.null(layout)) {
+    # Make the panel
+    # ncol: Number of columns of plots
+    # nrow: Number of rows needed, calculated from # of cols
+    layout <- matrix(seq(1, cols * ceiling(numPlots/cols)),
+                    ncol = cols, nrow = ceiling(numPlots/cols))
+  }
+
+ if (numPlots==1) {
+    print(plots[[1]])
+
+  } else {
+    # Set up the page
+    grid.newpage()
+    pushViewport(viewport(layout = grid.layout(nrow(layout), ncol(layout))))
+
+    # Make each plot, in the correct location
+    for (i in 1:numPlots) {
+      # Get the i,j matrix positions of the regions that contain this subplot
+      matchidx <- as.data.frame(which(layout == i, arr.ind = TRUE))
+
+      print(plots[[i]], vp = viewport(layout.pos.row = matchidx$row,
+                                      layout.pos.col = matchidx$col))
+    }
+  }
+}
+```
+
+
+## Data Exploration of the t-SNE plot with search terms
+
+``` {r tsne exploration 1}
+
+p1 <- findandplotterm(pmids,'calories')
+p2 <- findandplotterm(pmids,'memory')
+p3 <- findandplotterm(pmids,'cancer')
+p4 <- findandplotterm(pmids,'wine')
+p5 <- findandplotterm(pmids,'cheese')
+p6 <- findandplotterm(pmids,'polymorphism')
+p7 <- findandplotterm(pmids,'ethanol')
+p8 <- findandplotterm(pmids,'parabrachial')
+p9 <- findandplotterm(pmids,'bud')
+multiplot(p1,p2,p3,p4,p5,p6,p7,p8,p9,cols = 3)
+```
+
+## Data Exploration of the t-SNE plot with known genes expressed in taste buds
+
+``` {r tsne exploration 2}
+
+p11 <- findandplotterm(pmids,'gustducin')
+p12 <- findandplotterm(pmids,'t1r')
+p13 <- findandplotterm(pmids,'t2r')
+p14 <- findandplotterm(pmids,'pkd2l1')
+p15 <- findandplotterm(pmids,'BDNF')
+p16 <- findandplotterm(pmids,'cytokeratin')
+multiplot(p11,p12,p13,p14,p15,p16,cols = 2)
+```
+
+
+## Data Exploration with taste modalities
+
+``` {r tsne exploration 3}
+p21 <- findandplotterm(pmids,'sweet')
+p22 <- findandplotterm(pmids,'sour')
+p23 <- findandplotterm(pmids,'salty')
+p24 <- findandplotterm(pmids,'bitter')
+multiplot(p21,p22,p23,p24,cols = 2)
+```
+
+## Create training and test set for classification task
+
+Since I wanted to avoid manual annotation of taste abstracts to create a training and test set for supervised machine learning, I employed a restrictive combination of the k-means clustering (see above) and a keyword search. E.g. category 'A' is defined by cluster 1 and the presence of one of the keywords 'nutrition' and 'calories'.
+The most important category 'J' which is used for further expression analysis is defined by either cluster 7 or 12 and the presence of one of the keywords 'bud','receptor' or 'gustducin'.
+The selected abstracts for the different categories are plotted in the following plot.
+
+
+``` {r create training set for classification}
+#catframe <- data.frame(cat = factor())
+catidx <- extractCat(pmids,clusters = 1,searchterms = c('nutrition','calories'))
+cat <- rep('A',length(catidx))
+
+t1 <- extractCat(pmids,clusters = 2,searchterms = c('memory','learning','CTA'))
+t2 <- rep('B',length(t1))
+catidx <- c(catidx,t1)
+cat <- c(cat,t2)
+
+t1 <- extractCat(pmids,clusters = 3,searchterms = c('therapy','cancer'))
+t2 <- rep('C',length(t1))
+catidx <- c(catidx,t1)
+cat <- c(cat,t2)
+
+t1 <- extractCat(pmids,clusters = 4,searchterms = c('wine'))
+t2 <- rep('D',length(t1))
+catidx <- c(catidx,t1)
+cat <- c(cat,t2)
+
+t1 <- extractCat(pmids,clusters = 6,searchterms = c('taste','polymorphism','genetic'))
+t2 <- rep('E',length(t1))
+catidx <- c(catidx,t1)
+cat <- c(cat,t2)
+
+t1 <- extractCat(pmids,clusters = 8 ,searchterms = c('shelf','cheese'))
+t2 <- rep('F',length(t1))
+catidx <- c(catidx,t1)
+cat <- c(cat,t2)
+
+t1 <- extractCat(pmids,clusters = 9,searchterms = c('ethanol'))
+t2 <- rep('G',length(t1))
+catidx <- c(catidx,t1)
+cat <- c(cat,t2)
+
+t1 <- extractCat(pmids,clusters = 10,searchterms = c('insula','parabrachial','amygdala','lesion'))
+t2 <- rep('H',length(t1))
+catidx <- c(catidx,t1)
+cat <- c(cat,t2)
+
+t1 <- extractCat(pmids,clusters = c(7,12),searchterms = c('bud','gustducin','receptor'))
+t2 <- rep('J',length(t1))
+catidx <- c(catidx,t1)
+cat <- c(cat,t2)
+
+
+
+catdata <- tfidfsvu[catidx,1:10]
+catdata$cat <- as.factor(cat)
+
+ggplot() + 
+  geom_point(aes(x=tfidfsvu$tsne_X, y=tfidfsvu$tsne_Y), color='grey',size=1)    +   
+  geom_point(aes(x=tfidfsvu[catidx,'tsne_X'], y=tfidfsvu[catidx,'tsne_Y'],color = cat ), size=1) +
+  scale_colour_manual(values=cbPalette)
+```
+
+The resulting dataset is then split into a training set and a test set. A Random Forest prediction model is built from the singular values in the test set and a confusion matrix for the test set displayed.
+
+
+``` {r RandomForest}
+inTrain <- createDataPartition(catdata$cat,p = 0.75, list = FALSE)
+trainingset <- catdata[inTrain,]
+testset <- catdata[-inTrain,]
+set.seed(4321)
+model <- randomForest(cat ~ .,data = trainingset)
+trainpred <- predict(model,trainingset[,1:10])
+confusionMatrix(data = trainpred,reference = trainingset$cat)
+```
+
+Then the test set is predicted with the Random Forest model and a confusion matrix displayed.
+
+testInheritedMethods()}
+testpred <- predict(model,testset[,1:10])
+confusionMatrix(data = testpred,reference = testset$cat)
+```
+
+The accuracy for the test set turns out to be greater than 98%.
+
+## Prediction of the whole data set
+
+We now use our model to predict the whole data set. It should be noted that the test set is not representative of the complete data set. For example the 'garbage' cluster is not represented in the training and test sets at all. Also, a number of abstracts don't belong to one of the categories but will be forced into one by the prediction. The distribution of the categorized result is displayed in the folloing plot.
+
+``` {r prediction full}
+allpred <- predict(model,tfidfsvu[,1:10])
+tfidfsvu$pred <- allpred
+
+ggplot(tfidfsvu, aes(x=tsne_X, y=tsne_Y, color=pred) ) + 
+  geom_point(size=1)    +             
+  scale_colour_manual(values=cbPalette)
+
+```
+
+## Save pmids for abstracts with predicted class J (taste bud anatomy and physiology)
+
+``` {r save tastebud pmids}
+
+write(as.character(row.names(tfidfsvu)[tfidfsvu$pred == 'J']),'tastebudpmids.txt')
+```
+

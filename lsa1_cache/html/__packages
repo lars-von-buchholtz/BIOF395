@@ -1,0 +1,11 @@
+base
+Matrix
+irlba
+Rtsne
+ggplot2
+DBI
+RSQLite
+knitr
+lattice
+caret
+randomForest
