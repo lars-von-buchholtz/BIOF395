@@ -16,4 +16,5 @@ This analysis contains the following files:
   - `allpmids.txt`: row names for the matrix, all taste Pubmed IDs
   - `allterms.txt`: column names for the matrix, all terms for the TF-IDF
 - R markdown file `lsa1.Rmd`: performs latent semantic analysis (LSA) including Singular Value Decomposition (SVD), t-SNE plotting, hierarchical and k-means clustering. Contains functions for exploratory analysis and illustrates the distribution of important search terms such as genes expressed in taste bud cells. Finally, this code does a semi-supervised classification task by Random Forest machine learning models. It writes a list of Pubmed IDS 'tastebudpmids.txt' that contains all abstracts classified in class J: 'taste bud physiology'.
-- an html version of the R markdown file can be found at d
+- an html version `lsa1.html` of the R markdown file which can also be viewed at http://rpubs.com/lvonbuchholtz/BIOF395
+
